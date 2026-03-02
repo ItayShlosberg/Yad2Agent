@@ -9,21 +9,63 @@ from typing import Any
 
 log = logging.getLogger(__name__)
 
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
+VIDEO_EXTENSIONS = {".mp4", ".mov", ".webm"}
+MEDIA_EXTENSIONS = IMAGE_EXTENSIONS | VIDEO_EXTENSIONS
+
 
 class ListingLoader:
-    """Reads listing.json once and provides a formatted prompt section."""
+    """Reads listing.json and scans the media/ folder for a property directory."""
 
-    def __init__(self, listing_path: Path) -> None:
+    def __init__(self, property_dir: Path) -> None:
+        self._property_dir = property_dir
         self._data: dict[str, Any] = {}
+
+        listing_path = property_dir / "listing.json"
         if listing_path.exists():
             self._data = json.loads(listing_path.read_text(encoding="utf-8"))
             log.info("Listing loaded from %s", listing_path)
         else:
             log.warning("Listing file not found: %s", listing_path)
 
+        self._media_files = self._scan_media()
+        if self._media_files:
+            log.info("Found %d media files in %s", len(self._media_files), property_dir / "media")
+
+    def _scan_media(self) -> list[Path]:
+        media_dir = self._property_dir / "media"
+        if not media_dir.is_dir():
+            return []
+        return sorted(
+            f for f in media_dir.iterdir()
+            if f.is_file() and f.suffix.lower() in MEDIA_EXTENSIONS
+        )
+
     @property
     def data(self) -> dict[str, Any]:
         return self._data
+
+    @property
+    def media_files(self) -> list[Path]:
+        return self._media_files
+
+    @property
+    def has_media(self) -> bool:
+        return len(self._media_files) > 0
+
+    @property
+    def media_summary(self) -> str:
+        """Human-readable summary of available media for the LLM prompt."""
+        if not self._media_files:
+            return ""
+        images = [f for f in self._media_files if f.suffix.lower() in IMAGE_EXTENSIONS]
+        videos = [f for f in self._media_files if f.suffix.lower() in VIDEO_EXTENSIONS]
+        parts: list[str] = []
+        if images:
+            parts.append(f"{len(images)} image(s)")
+        if videos:
+            parts.append(f"{len(videos)} video(s)")
+        return ", ".join(parts)
 
     def format_for_prompt(self) -> str:
         """Convert the raw listing dict into a readable text block for the system prompt."""
@@ -145,9 +187,15 @@ class ListingLoader:
         if not pricing:
             return
         lines.append("\n=== PRICING ===")
-        lines.append(f"Asking price: {pricing.get('asking_price', 'N/A'):,} {pricing.get('currency', 'ILS')}")
+        currency = pricing.get("currency", "ILS")
+        if pricing.get("asking_price"):
+            lines.append(f"Asking price: {pricing['asking_price']:,} {currency}")
+        if pricing.get("monthly_rent_ils"):
+            lines.append(f"Monthly rent: {pricing['monthly_rent_ils']:,} {currency}")
         if pricing.get("price_per_sqm"):
-            lines.append(f"Price per sqm: {pricing['price_per_sqm']:,} {pricing.get('currency', 'ILS')}/sqm")
+            lines.append(f"Price per sqm: {pricing['price_per_sqm']:,} {currency}/sqm")
+        if pricing.get("electricity"):
+            lines.append(f"Electricity: {pricing['electricity']}")
         includes = pricing.get("price_includes", [])
         if includes:
             lines.append(f"Price includes: {', '.join(includes)}")

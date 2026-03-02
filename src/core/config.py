@@ -44,11 +44,38 @@ class LoggingConfig:
     level: str = "INFO"
     format: str = "%(asctime)s  %(levelname)-8s  %(name)s  %(message)s"
 
+    file_enabled: bool = False
+    file_path: str = "logs/agent.log"
+    file_max_bytes: int = 5_242_880
+    file_backup_count: int = 5
+
+    json_enabled: bool = False
+    json_path: str = "logs/agent.jsonl"
+    json_max_bytes: int = 10_485_760
+    json_backup_count: int = 3
+
 
 @dataclass(frozen=True)
 class PathsConfig:
     storage_dir: Path = field(default_factory=lambda: BASE_DIR / "storage")
-    listing_file: Path = field(default_factory=lambda: BASE_DIR / "data" / "listing.json")
+    data_dir: Path = field(default_factory=lambda: BASE_DIR / "data")
+    active_property: str = "property_1"
+
+    @property
+    def property_dir(self) -> Path:
+        return self.data_dir / self.active_property
+
+    @property
+    def listing_file(self) -> Path:
+        return self.property_dir / "listing.json"
+
+    @property
+    def media_dir(self) -> Path:
+        return self.property_dir / "media"
+
+    @property
+    def property_storage_dir(self) -> Path:
+        return self.storage_dir / self.active_property
 
 
 @dataclass(frozen=True)
@@ -96,6 +123,7 @@ class SecretsConfig:
     twilio_account_sid: str = ""
     twilio_auth_token: str = ""
     twilio_whatsapp_number: str = ""
+    media_base_url: str = ""
 
 
 @dataclass(frozen=True)
@@ -124,12 +152,18 @@ def load_config() -> AppConfig:
     log_level_env = os.getenv("LOG_LEVEL", "").upper()
     if log_level_env:
         log_raw["level"] = log_level_env
+
+    file_path = log_raw.pop("file_path", "logs/agent.log")
+    json_path = log_raw.pop("json_path", "logs/agent.jsonl")
+    log_raw["file_path"] = str(BASE_DIR / file_path)
+    log_raw["json_path"] = str(BASE_DIR / json_path)
     logging_cfg = LoggingConfig(**log_raw)
 
     paths_raw = app_raw.get("paths", {})
     paths = PathsConfig(
         storage_dir=BASE_DIR / paths_raw.get("storage_dir", "storage"),
-        listing_file=BASE_DIR / paths_raw.get("listing_file", "data/listing.json"),
+        data_dir=BASE_DIR / paths_raw.get("data_dir", "data"),
+        active_property=paths_raw.get("active_property", "property_1"),
     )
 
     reply_cfg = LLMModelConfig(**llm_raw.get("reply", {}))
@@ -155,6 +189,7 @@ def load_config() -> AppConfig:
         twilio_account_sid=os.getenv("TWILIO_ACCOUNT_SID", ""),
         twilio_auth_token=os.getenv("TWILIO_AUTH_TOKEN", ""),
         twilio_whatsapp_number=os.getenv("TWILIO_WHATSAPP_NUMBER", ""),
+        media_base_url=os.getenv("MEDIA_BASE_URL", ""),
     )
 
     return AppConfig(

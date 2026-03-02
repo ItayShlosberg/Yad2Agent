@@ -25,14 +25,16 @@ WhatsApp User
 │    ├── LLMService          (OpenAI)      │
 │    │     └── PromptBuilder (system prompt)│
 │    │           └── ListingLoader (JSON)  │
-│    └── LeadScorer          (YAML rules)  │
+│    ├── LeadScorer          (YAML rules)  │
+│    └── ListingLoader       (media scan)  │
 │                                          │
+│  /media  (StaticFiles — images & videos) │
 │  Models: Lead, Message                   │
 │  Config: YAML + .env                     │
 └──────────────────────────────────────────┘
-     │  TwiML XML
+     │  TwiML XML (+ <Media> URLs)
      ▼
-  Twilio → WhatsApp User
+  Twilio → WhatsApp User (text + images/videos)
 ```
 
 ### Message flow
@@ -44,8 +46,10 @@ WhatsApp User
    - *Reply call* (gpt-4o, plain text) — generates a natural response.
    - *Extraction call* (gpt-4o-mini, JSON mode) — pulls structured fields.
 5. **LeadScorer** merges extracted fields into the Lead and recomputes the score.
-6. The orchestrator persists the outbound message and updated lead.
-7. The webhook returns a TwiML `<Response><Message>` to Twilio.
+6. If the reply contains a `[SEND_MEDIA]` marker, the orchestrator strips it
+   and attaches all available property media URLs.
+7. The orchestrator persists the outbound message and updated lead.
+8. The webhook returns TwiML with `<Message>`, `<Body>`, and optional `<Media>` tags.
 
 ---
 
@@ -54,13 +58,13 @@ WhatsApp User
 ```
 Yad2Agent/
 ├── config/
-│   ├── app.yaml              # Server, logging, paths
+│   ├── app.yaml              # Server, logging, paths, active property
 │   ├── llm.yaml              # Model names, temperature, tokens
 │   └── qualifying.yaml       # Fields to collect, scoring rules
 ├── src/
 │   ├── main.py               # create_app() factory + uvicorn entry
 │   ├── api/
-│   │   └── webhook.py        # Thin route handlers
+│   │   └── webhook.py        # Thin route handlers (TwiML + media)
 │   ├── core/
 │   │   ├── config.py         # Typed config loaded from YAML + env
 │   │   └── logging.py        # Centralised logging setup
@@ -71,16 +75,29 @@ Yad2Agent/
 │       ├── llm_service.py    # OpenAI wrapper (reply + extraction)
 │       ├── prompts.py        # System & extraction prompt builder
 │       ├── store.py          # File-based conversation/lead persistence
-│       ├── listing.py        # Listing JSON loader + formatter
+│       ├── listing.py        # Listing JSON loader + media scanner
 │       ├── scorer.py         # Config-driven scoring & field application
 │       └── orchestrator.py   # Main workflow tying all services together
 ├── data/
-│   └── listing.json          # Property details (edit to match your listing)
-├── storage/                  # Runtime data — per-phone JSON files (gitignored)
+│   ├── property_1/           # Each property gets its own folder
+│   │   ├── listing.json      # Property details
+│   │   └── media/            # Images and videos for this property
+│   ├── property_2/
+│   │   ├── listing.json
+│   │   └── media/
+│   │       ├── photo1.jpeg
+│   │       └── tour.mp4
+│   └── ...
+├── storage/                  # Runtime data — scoped per property and phone
+│   ├── property_1/
+│   │   └── <phone>/
+│   │       ├── conversation.json
+│   │       └── lead.json
+│   └── property_2/
+│       └── ...
 ├── tests/
 │   └── test_smoke.py         # Automated multi-turn smoke test
 ├── .env                      # Secrets (never committed)
-├── .env.example              # Template for .env
 ├── .gitignore
 ├── requirements.txt
 └── README.md
@@ -104,7 +121,8 @@ logging:
 
 paths:
   storage_dir: storage
-  listing_file: data/listing.json
+  data_dir: data
+  active_property: property_1   # switch this to serve a different property
 ```
 
 ### `config/llm.yaml` — LLM Settings
@@ -169,10 +187,13 @@ TWILIO_ACCOUNT_SID=ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 TWILIO_AUTH_TOKEN=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 TWILIO_WHATSAPP_NUMBER=whatsapp:+14155238886
 GPT=sk-xxxxxxxxxxxxxxxxxxxxxxxx
+MEDIA_BASE_URL=https://your-ngrok-url.ngrok-free.dev
 LOG_LEVEL=info
 ```
 
 Secrets are **never** stored in YAML — only in `.env` (gitignored).
+`MEDIA_BASE_URL` must be the publicly-reachable base URL (ngrok in dev, your
+domain in prod) so Twilio can fetch media files.
 
 ---
 
@@ -202,7 +223,7 @@ pip install -r requirements.txt
 # 4. Copy .env.example to .env and fill in your keys
 cp .env.example .env
 
-# 5. Edit data/listing.json with your property details
+# 5. Edit data/property_1/listing.json with your property details
 
 # 6. Start the server
 uvicorn src.main:app --reload --port 8000
@@ -289,7 +310,7 @@ Sends a 5-turn conversation and validates every response + final lead state.
 
 ## Lead Data Model
 
-Stored as `storage/<phone>/lead.json`:
+Stored as `storage/<property>/<phone>/lead.json`:
 
 ```json
 {
@@ -315,10 +336,39 @@ mentions them, but the agent won't actively ask about them.
 
 ---
 
-## Listing Configuration
+## Multi-Property Listings
 
-Edit `data/listing.json` with your property details.  The agent uses this as
-its **single source of truth** — it will never invent facts not in this file.
+The system supports multiple property listings. Each property lives in its own
+folder under `data/` with a `listing.json` and an optional `media/` subfolder.
+
+### Adding a new property
+
+1. Create a folder under `data/` (e.g. `data/property_3/`).
+2. Add a `listing.json` with the property details.
+3. Optionally add images and videos to `data/property_3/media/`.
+4. Set `active_property: property_3` in `config/app.yaml`.
+5. Restart the server.
+
+### Switching the active property
+
+Change `paths.active_property` in `config/app.yaml` and restart. The agent
+will load the new property's listing and media. Conversation storage is scoped
+per property, so each property maintains its own lead history.
+
+### Media support
+
+Place images (`.jpg`, `.jpeg`, `.png`, `.webp`) and videos (`.mp4`, `.mov`,
+`.webm`) in the property's `media/` folder. When a lead asks to see photos or
+the property, the agent automatically sends all available media via WhatsApp.
+
+The `MEDIA_BASE_URL` environment variable must point to the public base URL
+(your ngrok URL in development) so Twilio can fetch the files.
+
+### Listing configuration
+
+Edit `data/<property>/listing.json` with the property details. The agent uses
+this as its **single source of truth** — it will never invent facts not in
+this file.
 
 Key sections: `property`, `pricing`, `availability`, `building_amenities`,
 `location`, `highlights`, `known_issues`, `owner_instructions`.
@@ -351,8 +401,8 @@ For production:
 
 ## Security & Privacy
 
-- **PII**: Phone numbers are stored as folder names (digits only).
-  In production, consider hashing them.
+- **PII**: Phone numbers are stored as folder names (digits only) under
+  each property's storage directory.  In production, consider hashing them.
 - **Secrets**: API keys live exclusively in `.env`, never in YAML or code.
 - **Logging**: Hebrew message content appears in logs.  In production,
   reduce log level or redact PII from log output.

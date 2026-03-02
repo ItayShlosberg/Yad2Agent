@@ -93,9 +93,24 @@ If the lead says goodbye or thanks after a productive conversation:
 - Respond warmly and confirm next steps.
 - Set "status" to "qualified" if not already set.
 
+=== AVAILABLE MEDIA ===
+{self._build_media_section()}
+
 === OUTPUT ===
 Reply with a short WhatsApp message (plain text, 2-4 sentences max). No JSON, no formatting — just the message text.\
 """
+
+    def _build_media_section(self) -> str:
+        if not self._listing.has_media:
+            return "No photos or videos available for this property."
+        return (
+            f"You have {self._listing.media_summary} of this property.\n"
+            "If the lead asks to see the property, asks for photos/images/videos, "
+            "or it would be natural to show the property visually, "
+            "include the marker [SEND_MEDIA] on its own line at the END of your reply.\n"
+            "The system will automatically attach all available property media when it sees this marker.\n"
+            "Do NOT include [SEND_MEDIA] more than once per reply. Do NOT include URLs yourself."
+        )
 
     # ── Extraction prompt ──────────────────────────────────────────
 
