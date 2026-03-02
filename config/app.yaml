@@ -1,0 +1,12 @@
+server:
+  host: "0.0.0.0"
+  port: 8000
+  reload: true
+
+logging:
+  level: INFO
+  format: "%(asctime)s  %(levelname)-8s  %(name)s  %(message)s"
+
+paths:
+  storage_dir: storage
+  listing_file: data/listing.json
