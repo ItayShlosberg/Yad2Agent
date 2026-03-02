@@ -34,24 +34,41 @@ async def health():
 
 
 def _build_twiml(body: str, media_urls: list[str] | None = None) -> str:
+    """Build TwiML response.
+
+    WhatsApp allows at most one media attachment per message, so when we
+    have multiple files we emit one <Message> per file (the first carries
+    the text body, the rest are media-only).
+    """
     safe_body = html.escape(body)
     cb_attr = ""
     if _status_callback_url:
         cb_attr = f' statusCallback="{html.escape(_status_callback_url)}"'
 
-    if media_urls:
-        media_tags = "".join(f"<Media>{html.escape(url)}</Media>" for url in media_urls)
+    if not media_urls:
         return (
             '<?xml version="1.0" encoding="UTF-8"?>'
             "<Response>"
-            f"<Message{cb_attr}><Body>{safe_body}</Body>{media_tags}</Message>"
+            f"<Message{cb_attr}>{safe_body}</Message>"
             "</Response>"
+        )
+
+    parts: list[str] = []
+    parts.append(
+        f"<Message{cb_attr}>"
+        f"<Body>{safe_body}</Body>"
+        f"<Media>{html.escape(media_urls[0])}</Media>"
+        f"</Message>"
+    )
+    for url in media_urls[1:]:
+        parts.append(
+            f"<Message{cb_attr}>"
+            f"<Media>{html.escape(url)}</Media>"
+            f"</Message>"
         )
     return (
         '<?xml version="1.0" encoding="UTF-8"?>'
-        "<Response>"
-        f"<Message{cb_attr}>{safe_body}</Message>"
-        "</Response>"
+        "<Response>" + "".join(parts) + "</Response>"
     )
 
 

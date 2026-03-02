@@ -20,4 +20,4 @@ logging:
 paths:
   storage_dir: storage
   data_dir: data
-  active_property: property_1
+  active_property: property_2

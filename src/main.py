@@ -1,7 +1,7 @@
 """
 Application factory and entry point.
 
-    uvicorn src.main:app --reload --port 8000
+    uvicorn src.main:app --reload --reload-include "*.yaml" --port 8000
 """
 
 from __future__ import annotations
@@ -70,4 +70,5 @@ if __name__ == "__main__":
         host=_cfg.server.host,
         port=_cfg.server.port,
         reload=_cfg.server.reload,
+        reload_includes=["*.yaml"] if _cfg.server.reload else [],
     )
