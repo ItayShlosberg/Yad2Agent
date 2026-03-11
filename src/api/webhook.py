@@ -10,8 +10,9 @@ from __future__ import annotations
 import html
 import logging
 
-from fastapi import APIRouter, Request, Response, status
+from fastapi import APIRouter, Depends, Request, Response, status
 
+from src.api.security import verify_twilio_signature
 from src.services.orchestrator import ConversationOrchestrator
 
 router = APIRouter()
@@ -72,7 +73,7 @@ def _build_twiml(body: str, media_urls: list[str] | None = None) -> str:
     )
 
 
-@router.post("/webhook")
+@router.post("/webhook", dependencies=[Depends(verify_twilio_signature)])
 async def twilio_whatsapp_webhook(request: Request):
     form = await request.form()
     sender = form.get("From", "unknown")
@@ -84,7 +85,7 @@ async def twilio_whatsapp_webhook(request: Request):
     return Response(content=twiml, media_type="text/xml", status_code=status.HTTP_200_OK)
 
 
-@router.post("/webhook/status")
+@router.post("/webhook/status", dependencies=[Depends(verify_twilio_signature)])
 async def twilio_status_callback(request: Request):
     """
     Twilio POSTs here when a message delivery status changes.

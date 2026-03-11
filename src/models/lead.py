@@ -42,6 +42,7 @@ class Context(BaseModel):
 class Signals(BaseModel):
     red_flags: List[str] = Field(default_factory=list)
     notes: Optional[str] = None
+    opted_out: Optional[bool] = None
 
 
 class Lead(BaseModel):
@@ -53,6 +54,8 @@ class Lead(BaseModel):
     context: Context = Field(default_factory=Context)
     signals: Signals = Field(default_factory=Signals)
     score: Optional[int] = None
+    notified_at: Optional[str] = None
+    closed_at: Optional[str] = None
 
     # ── Introspection helpers (config-driven) ──────────────────────
 

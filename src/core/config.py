@@ -111,10 +111,39 @@ class ScoringConfig:
 
 
 @dataclass(frozen=True)
+class StatusRulesConfig:
+    min_turns: int = 2
+    qualified_max_missing: int = 1
+    budget_floor_pct: float = 0.6
+
+@dataclass(frozen=True)
 class QualifyingConfig:
     fields: list[QualifyingField] = field(default_factory=list)
+    fields_by_type: dict[str, list[QualifyingField]] = field(default_factory=dict)
     scoring: ScoringConfig = field(default_factory=ScoringConfig)
+    status_rules: StatusRulesConfig = field(default_factory=StatusRulesConfig)
     qualified_max_missing: int = 2
+
+    def fields_for_type(self, property_type: str) -> list[QualifyingField]:
+        """Return the field list for a property type, falling back to ``fields``."""
+        return self.fields_by_type.get(property_type, self.fields)
+
+
+@dataclass(frozen=True)
+class NotificationConfig:
+    enabled: bool = True
+
+
+@dataclass(frozen=True)
+class RateLimitConfig:
+    max_messages: int = 10
+    window_seconds: int = 300
+    cooldown_message: str = "אתה שולח הודעות מהר מדי. נסה שוב בעוד מספר דקות."
+
+
+@dataclass(frozen=True)
+class SecurityConfig:
+    validate_twilio_signature: bool = False
 
 
 @dataclass(frozen=True)
@@ -124,6 +153,7 @@ class SecretsConfig:
     twilio_auth_token: str = ""
     twilio_whatsapp_number: str = ""
     media_base_url: str = ""
+    owner_whatsapp_number: str = ""
 
 
 @dataclass(frozen=True)
@@ -134,6 +164,9 @@ class AppConfig:
     llm: LLMConfig
     qualifying: QualifyingConfig
     secrets: SecretsConfig
+    notification: NotificationConfig = field(default_factory=NotificationConfig)
+    rate_limit: RateLimitConfig = field(default_factory=RateLimitConfig)
+    security: SecurityConfig = field(default_factory=SecurityConfig)
 
 
 # ── Factory ────────────────────────────────────────────────────────
@@ -176,12 +209,25 @@ def load_config() -> AppConfig:
 
     raw_fields = qual_raw.get("fields", [])
     q_fields = [QualifyingField(**f) for f in raw_fields]
+
+    raw_by_type = qual_raw.get("fields_by_type", {})
+    fields_by_type: dict[str, list[QualifyingField]] = {}
+    for ptype, flist in raw_by_type.items():
+        fields_by_type[ptype] = [QualifyingField(**f) for f in flist]
+
     scoring = ScoringConfig(**qual_raw.get("scoring", {}))
+
+    status_rules_raw = qual_raw.get("status_rules", {})
+    status_rules = StatusRulesConfig(**status_rules_raw)
+
     status_trans = qual_raw.get("status_transitions", {})
     qualifying = QualifyingConfig(
         fields=q_fields,
+        fields_by_type=fields_by_type,
         scoring=scoring,
-        qualified_max_missing=status_trans.get("qualified_max_missing", 2),
+        status_rules=status_rules,
+        qualified_max_missing=status_rules.qualified_max_missing
+            if status_rules_raw else status_trans.get("qualified_max_missing", 2),
     )
 
     secrets = SecretsConfig(
@@ -190,7 +236,12 @@ def load_config() -> AppConfig:
         twilio_auth_token=os.getenv("TWILIO_AUTH_TOKEN", ""),
         twilio_whatsapp_number=os.getenv("TWILIO_WHATSAPP_NUMBER", ""),
         media_base_url=os.getenv("MEDIA_BASE_URL", ""),
+        owner_whatsapp_number=os.getenv("OWNER_WHATSAPP_NUMBER", ""),
     )
+
+    notification = NotificationConfig(**app_raw.get("notification", {}))
+    rate_limit = RateLimitConfig(**app_raw.get("rate_limit", {}))
+    security = SecurityConfig(**app_raw.get("security", {}))
 
     return AppConfig(
         server=server,
@@ -199,4 +250,7 @@ def load_config() -> AppConfig:
         llm=llm,
         qualifying=qualifying,
         secrets=secrets,
+        notification=notification,
+        rate_limit=rate_limit,
+        security=security,
     )

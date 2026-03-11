@@ -2,18 +2,22 @@
 OpenAI GPT wrapper.
 
 Uses a two-call strategy:
-  1. Reply call  — plain text (avoids Hebrew JSON encoding bugs).
-  2. Extract call — structured JSON (English-only, fast, cheap model).
+  1. Reply call  — plain text conversation (GPT-4o).
+  2. Extract call — pure data parsing from the user's message (GPT-4o-mini).
+
+The extraction call sees ONLY the user's message and current lead state.
+It does NOT see the agent's reply or make status judgments.
 """
 
 from __future__ import annotations
 
-import json
 import logging
 
 from openai import OpenAI
+from pydantic import ValidationError
 
 from src.core.config import LLMConfig
+from src.models.extraction import ExtractedFields
 from src.models.lead import Lead
 from src.services.prompts import PromptBuilder
 
@@ -30,28 +34,25 @@ class LLMService:
 
     # ── Public API ─────────────────────────────────────────────────
 
-    def get_reply_and_extraction(
+    def get_reply(
         self,
         conversation: list[dict],
         lead: Lead,
-    ) -> tuple[str, dict]:
-        """Return (reply_text, extracted_fields_dict)."""
-        messages = self._prompts.build_messages(conversation, lead)
+        next_field_hint: str = "",
+    ) -> str:
+        """Generate a conversational reply."""
+        messages = self._prompts.build_messages(conversation, lead, next_field_hint)
+        return self._call_reply(messages)
 
-        reply = self._get_reply(messages)
-
-        latest_user_msg = ""
-        for msg in reversed(conversation):
-            if msg["direction"] == "inbound":
-                latest_user_msg = msg["body"]
-                break
-
-        extracted = self._extract_fields(latest_user_msg, lead) if latest_user_msg else {}
-        return reply, extracted
+    def get_extraction(self, user_message: str, lead: Lead) -> ExtractedFields:
+        """Extract structured fields from the latest user message."""
+        if not user_message:
+            return ExtractedFields()
+        return self._call_extraction(user_message, lead)
 
     # ── Internals ──────────────────────────────────────────────────
 
-    def _get_reply(self, messages: list[dict]) -> str:
+    def _call_reply(self, messages: list[dict]) -> str:
         cfg = self._cfg.reply
         try:
             response = self._client.chat.completions.create(
@@ -69,15 +70,16 @@ class LLMService:
             log.error("GPT reply call failed: %s", exc)
             return self._cfg.fallback_message
 
-    def _extract_fields(self, user_message: str, lead: Lead) -> dict:
+    def _call_extraction(self, user_message: str, lead: Lead) -> ExtractedFields:
         cfg = self._cfg.extraction
+        raw = "{}"
         try:
-            context = f"Lead so far: {lead.filled_summary()}\nMissing: {', '.join(lead.missing_fields(self._prompts._qualifying))}"
+            context = f"Lead so far: {lead.filled_summary()}"
             response = self._client.chat.completions.create(
                 model=cfg.model,
                 messages=[
                     {"role": "system", "content": self._prompts.extraction_prompt()},
-                    {"role": "user", "content": f"{context}\n\nLatest message: {user_message}"},
+                    {"role": "user", "content": f"{context}\n\nUser message: {user_message}"},
                 ],
                 response_format={"type": "json_object"},
                 temperature=cfg.temperature,
@@ -85,7 +87,10 @@ class LLMService:
             )
             raw = response.choices[0].message.content or "{}"
             log.info("Extraction result: %s", raw[:300])
-            return json.loads(raw)
+            return ExtractedFields.model_validate_json(raw)
+        except ValidationError as exc:
+            log.warning("Extraction validation failed — raw=%s err=%s", raw, exc)
+            return ExtractedFields()
         except Exception as exc:
-            log.error("Extraction call failed: %s", exc)
-            return {}
+            log.error("Extraction call failed: %s", exc, exc_info=True)
+            return ExtractedFields()

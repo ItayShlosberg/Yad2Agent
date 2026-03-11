@@ -3,8 +3,8 @@
 An AI-powered WhatsApp agent that screens inbound real-estate leads.  When a
 potential buyer or renter messages about a listing, the agent answers property
 questions, gradually qualifies the lead by collecting structured data, scores
-them, and marks them as **qualified** or **disqualified** — all without human
-intervention.
+them, and — once qualified — automatically notifies the property owner and
+closes the conversation.
 
 ---
 
@@ -17,39 +17,49 @@ WhatsApp User
   Twilio (WhatsApp Sandbox / Business API)
      │  POST /webhook
      ▼
-┌──────────────────────────────────────────┐
-│  FastAPI  (src/api/webhook.py)           │
-│    ↓                                     │
-│  ConversationOrchestrator                │
-│    ├── ConversationStore   (file I/O)    │
-│    ├── LLMService          (OpenAI)      │
-│    │     └── PromptBuilder (system prompt)│
-│    │           └── ListingLoader (JSON)  │
-│    ├── LeadScorer          (YAML rules)  │
-│    └── ListingLoader       (media scan)  │
-│                                          │
-│  /media  (StaticFiles — images & videos) │
-│  Models: Lead, Message                   │
-│  Config: YAML + .env                     │
-└──────────────────────────────────────────┘
+┌─────────────────────────────────────────────┐
+│  FastAPI  (src/api/)                        │
+│    ├── webhook.py       TwiML routes        │
+│    ├── leads.py         GET /leads API      │
+│    └── security.py      Twilio sig. check   │
+│                                             │
+│  ConversationOrchestrator                   │
+│    ├── RateLimiter         (in-memory)      │
+│    ├── ConversationStore   (file I/O)       │
+│    ├── LLMService          (OpenAI)         │
+│    │     └── PromptBuilder (system prompt)  │
+│    │           └── ListingLoader (JSON)     │
+│    ├── LeadScorer          (YAML rules)     │
+│    ├── NotificationService (Twilio REST)    │
+│    └── ListingLoader       (media scan)     │
+│                                             │
+│  /media  (StaticFiles — images & videos)    │
+│  Models: Lead, Message, ExtractedFields     │
+│  Config: YAML + .env                        │
+└─────────────────────────────────────────────┘
      │  TwiML XML (+ <Media> URLs)
      ▼
   Twilio → WhatsApp User (text + images/videos)
 ```
 
-### Message flow
+### Message Flow
 
 1. Twilio receives a WhatsApp message and POSTs form data to `/webhook`.
-2. The webhook hands the sender and body to the **ConversationOrchestrator**.
-3. The orchestrator persists the inbound message, loads history + lead state.
-4. **LLMService** makes two OpenAI calls:
+2. If Twilio signature validation is enabled, `security.py` verifies the `X-Twilio-Signature` header.
+3. The webhook hands the sender and body to the **ConversationOrchestrator**.
+4. The orchestrator checks end-state first:
+   - **Closed** leads get a static reply — no LLM call.
+   - **Disqualified** leads get a static reply — no LLM call.
+5. The **RateLimiter** checks if the sender exceeded the message limit. If so, a cooldown reply is returned without calling the LLM.
+6. **LLMService** makes two OpenAI calls:
    - *Reply call* (gpt-4o, plain text) — generates a natural response.
-   - *Extraction call* (gpt-4o-mini, JSON mode) — pulls structured fields.
-5. **LeadScorer** merges extracted fields into the Lead and recomputes the score.
-6. If the reply contains a `[SEND_MEDIA]` marker, the orchestrator strips it
-   and attaches all available property media URLs.
-7. The orchestrator persists the outbound message and updated lead.
-8. The webhook returns TwiML with `<Message>`, `<Body>`, and optional `<Media>` tags.
+   - *Extraction call* (gpt-4o-mini, JSON schema mode) — pulls structured fields via Pydantic `ExtractedFields` model.
+7. **LeadScorer** merges extracted fields into the Lead and recomputes the score.
+8. If the lead just became **qualified** and hasn't been notified yet:
+   - **NotificationService** sends a WhatsApp summary to the property owner.
+   - The lead is marked **closed** with `notified_at` and `closed_at` timestamps.
+9. If the reply contains a `[SEND_MEDIA]` marker, the orchestrator strips it and attaches all available property media URLs.
+10. The webhook returns TwiML with `<Message>`, `<Body>`, and optional `<Media>` tags.
 
 ---
 
@@ -58,45 +68,52 @@ WhatsApp User
 ```
 Yad2Agent/
 ├── config/
-│   ├── app.yaml              # Server, logging, paths, active property
+│   ├── app.yaml              # Server, logging, paths, notification, rate limit, security
 │   ├── llm.yaml              # Model names, temperature, tokens
 │   └── qualifying.yaml       # Fields to collect, scoring rules
 ├── src/
 │   ├── main.py               # create_app() factory + uvicorn entry
 │   ├── api/
-│   │   └── webhook.py        # Thin route handlers (TwiML + media)
+│   │   ├── webhook.py        # Thin route handlers (TwiML + media)
+│   │   ├── leads.py          # GET /leads summary endpoint
+│   │   └── security.py       # Twilio signature validation dependency
 │   ├── core/
 │   │   ├── config.py         # Typed config loaded from YAML + env
 │   │   └── logging.py        # Centralised logging setup
 │   ├── models/
 │   │   ├── lead.py           # Lead, Intent, Criteria, Context, Signals
-│   │   └── message.py        # Message model
+│   │   ├── message.py        # Message model
+│   │   └── extraction.py     # Pydantic ExtractedFields for LLM output
 │   └── services/
-│       ├── llm_service.py    # OpenAI wrapper (reply + extraction)
+│       ├── llm_service.py    # OpenAI wrapper (reply + structured extraction)
 │       ├── prompts.py        # System & extraction prompt builder
 │       ├── store.py          # File-based conversation/lead persistence
 │       ├── listing.py        # Listing JSON loader + media scanner
 │       ├── scorer.py         # Config-driven scoring & field application
-│       └── orchestrator.py   # Main workflow tying all services together
+│       ├── orchestrator.py   # Main workflow tying all services together
+│       ├── notifier.py       # Owner WhatsApp notification via Twilio REST
+│       └── rate_limiter.py   # In-memory sliding-window rate limiter
 ├── data/
 │   ├── property_1/           # Each property gets its own folder
-│   │   ├── listing.json      # Property details
-│   │   └── media/            # Images and videos for this property
+│   │   ├── listing.json
+│   │   └── media/
 │   ├── property_2/
 │   │   ├── listing.json
 │   │   └── media/
-│   │       ├── photo1.jpeg
-│   │       └── tour.mp4
 │   └── ...
 ├── storage/                  # Runtime data — scoped per property and phone
 │   ├── property_1/
 │   │   └── <phone>/
 │   │       ├── conversation.json
 │   │       └── lead.json
-│   └── property_2/
-│       └── ...
+│   └── property_2/ ...
 ├── tests/
-│   └── test_smoke.py         # Automated multi-turn smoke test
+│   ├── test_smoke.py         # Automated multi-turn smoke test
+│   ├── test_end_state.py     # Conversation end-state + notification tests
+│   ├── test_rate_limiter.py  # Rate limiter unit tests
+│   ├── test_extraction.py    # Pydantic extraction model tests
+│   ├── test_leads_api.py     # Leads endpoint integration tests
+│   └── test_security.py      # Twilio signature validation tests
 ├── .env                      # Secrets (never committed)
 ├── .gitignore
 ├── requirements.txt
@@ -107,41 +124,55 @@ Yad2Agent/
 
 ## Configuration
 
-### `config/app.yaml` — Server & Paths
+### `config/app.yaml` — Server, Paths & Features
 
 ```yaml
 server:
   host: "0.0.0.0"
   port: 8000
-  reload: true            # set to false in production
+  reload: true
 
 logging:
   level: INFO
-  format: "%(asctime)s  %(levelname)-8s  %(name)s  %(message)s"
+  file_enabled: true
+  file_path: logs/agent.log
+  json_enabled: true
+  json_path: logs/agent.jsonl
 
 paths:
   storage_dir: storage
   data_dir: data
-  active_property: property_1   # switch this to serve a different property
+  active_property: property_1
+
+notification:
+  enabled: true               # send WhatsApp summary to owner on qualification
+
+rate_limit:
+  max_messages: 10
+  window_seconds: 300          # 10 messages per 5 minutes per phone
+  cooldown_message: "אתה שולח הודעות מהר מדי. נסה שוב בעוד מספר דקות."
+
+security:
+  validate_twilio_signature: false   # set true in production
 ```
 
 ### `config/llm.yaml` — LLM Settings
 
 ```yaml
 reply:
-  model: gpt-4o            # used for conversational replies
+  model: gpt-4o
   temperature: 0.4
   max_tokens: 300
 
 extraction:
-  model: gpt-4o-mini       # used for structured field extraction
+  model: gpt-4o-mini
   temperature: 0.1
   max_tokens: 300
 
 fallback_message: "תודה על ההודעה! אחזור אליך בהקדם."
 ```
 
-### `config/qualifying.yaml` — What the Agent Asks About
+### `config/qualifying.yaml` — What the Agent Collects
 
 ```yaml
 fields:
@@ -173,12 +204,8 @@ scoring:
   max_score: 100
 
 status_transitions:
-  qualified_max_missing: 2    # lead qualifies with at most 2 fields missing
+  qualified_max_missing: 2
 ```
-
-To add a new qualifying field: add an entry to `fields`, then make sure the
-Lead model in `src/models/lead.py` has a corresponding attribute, and the
-`missing_fields()` method has a checker for it.
 
 ### `.env` — Secrets
 
@@ -186,14 +213,75 @@ Lead model in `src/models/lead.py` has a corresponding attribute, and the
 TWILIO_ACCOUNT_SID=ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 TWILIO_AUTH_TOKEN=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 TWILIO_WHATSAPP_NUMBER=whatsapp:+14155238886
+OWNER_WHATSAPP_NUMBER=whatsapp:+972546487753
 GPT=sk-xxxxxxxxxxxxxxxxxxxxxxxx
 MEDIA_BASE_URL=https://your-ngrok-url.ngrok-free.dev
-LOG_LEVEL=info
 ```
 
 Secrets are **never** stored in YAML — only in `.env` (gitignored).
-`MEDIA_BASE_URL` must be the publicly-reachable base URL (ngrok in dev, your
-domain in prod) so Twilio can fetch media files.
+
+---
+
+## Features
+
+### Owner Notification
+
+When a lead qualifies (enough fields collected, lead interested), the system:
+1. Sends a structured WhatsApp summary to `OWNER_WHATSAPP_NUMBER` via Twilio REST API.
+2. Sets `lead.notified_at` to prevent duplicate notifications.
+3. Transitions the lead to `closed` status.
+4. Appends a handoff message to the WhatsApp reply.
+
+Toggle with `notification.enabled` in `app.yaml`. Requires the `twilio` package.
+
+### Conversation End State
+
+Leads have four statuses: `collecting`, `qualified`, `disqualified`, `closed`.
+
+| Status         | Behavior |
+|----------------|----------|
+| `collecting`   | Normal LLM conversation — fields being gathered |
+| `qualified`    | Triggers notification + auto-transition to `closed` |
+| `disqualified` | Static reply — no LLM call, no OpenAI cost |
+| `closed`       | Static reply — no LLM call, no OpenAI cost |
+
+Once a lead is `closed` or `disqualified`, further messages get a polite static response without any LLM invocation.
+
+### Leads Summary API
+
+```
+GET /leads                     # all leads, sorted by last activity
+GET /leads?status=qualified    # filter by status
+GET /leads?property=property_2 # filter by property
+```
+
+Returns a JSON array with phone, name, status, score, intent, budget, message count, timestamps, and notification info.
+
+### Rate Limiting
+
+An in-memory sliding-window rate limiter protects against message floods:
+- Default: 10 messages per 5 minutes per phone number.
+- Exceeding the limit returns a cooldown message without calling OpenAI.
+- Configured in `app.yaml` under `rate_limit`.
+
+### Pydantic Structured Extraction
+
+The LLM extraction call uses OpenAI's `response_format` with a JSON schema derived from the `ExtractedFields` Pydantic model. This provides:
+- Type-safe field extraction (Literal types for intent/status, Optional for all fields).
+- Automatic validation — malformed LLM output is caught and logged.
+- Clean integration with the scorer via `model_dump(exclude_none=True)`.
+
+### Twilio Signature Validation
+
+When `security.validate_twilio_signature: true`, incoming webhook requests are verified using the `X-Twilio-Signature` header and `TWILIO_AUTH_TOKEN`. Invalid or missing signatures return HTTP 403. Disabled by default for local development.
+
+### Multi-Property Listings
+
+Each property lives in its own folder under `data/` with a `listing.json` and optional `media/` subfolder. Switch properties by changing `paths.active_property` in `app.yaml`. Conversations are scoped per property.
+
+### Media Support
+
+Images (`.jpg`, `.jpeg`, `.png`, `.webp`) and videos (`.mp4`, `.mov`, `.webm`) in the `media/` folder are automatically sent when the lead asks for photos. One media file per WhatsApp message (WhatsApp protocol limit), sent as separate `<Message>` elements in TwiML.
 
 ---
 
@@ -209,54 +297,40 @@ domain in prod) so Twilio can fetch media files.
 ### Steps
 
 ```bash
-# 1. Clone and enter the project
 cd Yad2Agent
-
-# 2. Create virtual environment
 python -m venv .venv
 .venv\Scripts\Activate.ps1          # Windows PowerShell
 # source .venv/bin/activate          # macOS / Linux
 
-# 3. Install dependencies
 pip install -r requirements.txt
 
-# 4. Copy .env.example to .env and fill in your keys
-cp .env.example .env
+cp .env.example .env                 # fill in your keys
 
-# 5. Edit data/property_1/listing.json with your property details
+uvicorn src.main:app --reload --reload-include "*.yaml" --port 8000
 
-# 6. Start the server
-uvicorn src.main:app --reload --port 8000
-
-# 7. In another terminal, expose via ngrok
+# In another terminal:
 ngrok http 8000
-
-# 8. Configure Twilio WhatsApp Sandbox
-#    Webhook URL:  https://<your-ngrok-url>/webhook
-#    Method:       POST
 ```
+
+Configure the Twilio WhatsApp Sandbox webhook URL to `https://<ngrok-url>/webhook` (POST).
 
 ### Quick Test
 
 ```bash
-# Health check
 curl http://localhost:8000/health
 
-# Simulate a Twilio message
 curl -X POST http://localhost:8000/webhook \
   -H "Content-Type: application/x-www-form-urlencoded" \
   -d "From=whatsapp%3A%2B972501234567&Body=Hello"
+
+curl http://localhost:8000/leads
 ```
 
-### Automated Smoke Test
-
-With the server running:
+### Running Tests
 
 ```bash
-python tests/test_smoke.py
+python -m pytest tests/ -v
 ```
-
-Sends a 5-turn conversation and validates every response + final lead state.
 
 ---
 
@@ -269,26 +343,35 @@ Sends a 5-turn conversation and validates every response + final lead state.
                     └─────┬─────┘
                           ▼
                 ┌───────────────────┐
+                │ Rate limit check  │──── over limit? → cooldown reply
+                └─────────┬─────────┘
+                          ▼
+                ┌───────────────────┐
+                │ End-state check   │──── closed/disqualified? → static reply
+                └─────────┬─────────┘
+                          ▼
+                ┌───────────────────┐
                 │ Answer property   │◄──── listing.json
-                │ questions         │      (ground truth)
+                │ questions         │
                 └─────────┬─────────┘
                           ▼
                 ┌───────────────────┐
                 │ Ask ONE qualifying│◄──── qualifying.yaml
-                │ question per turn │      (priority order)
+                │ question per turn │
                 └─────────┬─────────┘
                           ▼
                 ┌───────────────────┐
-                │ Extract fields    │──── updates lead.json
-                │ + score lead      │     (per-phone storage)
+                │ Extract fields    │──── Pydantic ExtractedFields
+                │ + score lead      │     + updates lead.json
                 └─────────┬─────────┘
                           ▼
                 ┌───────────────────┐
-          ┌─────│ Missing ≤ 2?      │─────┐
+          ┌─────│ Qualified?        │─────┐
           │ no  └───────────────────┘ yes │
           ▼                               ▼
-    Keep asking                    Mark "qualified"
-                                   Offer next step
+    Keep asking                    Notify owner (WhatsApp)
+                                   Set status = closed
+                                   Append handoff message
 ```
 
 ### Scoring
@@ -298,17 +381,7 @@ Sends a 5-turn conversation and validates every response + final lead state.
 - Each red flag: **-15 penalty**
 - Max score: **100**
 
-### Status Transitions
-
-| Status        | Trigger |
-|---------------|---------|
-| `collecting`  | Default — fields still being gathered |
-| `qualified`   | Most fields collected, lead interested |
-| `disqualified`| Lead not interested, budget way off, or disengaged |
-
----
-
-## Lead Data Model
+### Lead Data Model
 
 Stored as `storage/<property>/<phone>/lead.json`:
 
@@ -316,71 +389,17 @@ Stored as `storage/<property>/<phone>/lead.json`:
 {
   "phone": "whatsapp:+972501234567",
   "name": "דני",
-  "status": "qualified",
+  "status": "closed",
   "intent": { "type": "buy" },
   "criteria": {
     "budget_max": 2400000,
-    "budget_currency": "ILS",
-    "equity_amount": 500000,
     "timeframe": "1-3 months",
     "wants_visit": true
   },
-  "context": { "neighborhoods": [], "must_haves": [] },
   "signals": { "red_flags": [] },
-  "score": 85
-}
-```
-
-Passive fields like `has_mortgage_approval` are still stored if the lead
-mentions them, but the agent won't actively ask about them.
-
----
-
-## Multi-Property Listings
-
-The system supports multiple property listings. Each property lives in its own
-folder under `data/` with a `listing.json` and an optional `media/` subfolder.
-
-### Adding a new property
-
-1. Create a folder under `data/` (e.g. `data/property_3/`).
-2. Add a `listing.json` with the property details.
-3. Optionally add images and videos to `data/property_3/media/`.
-4. Set `active_property: property_3` in `config/app.yaml`.
-5. Restart the server.
-
-### Switching the active property
-
-Change `paths.active_property` in `config/app.yaml` and restart. The agent
-will load the new property's listing and media. Conversation storage is scoped
-per property, so each property maintains its own lead history.
-
-### Media support
-
-Place images (`.jpg`, `.jpeg`, `.png`, `.webp`) and videos (`.mp4`, `.mov`,
-`.webm`) in the property's `media/` folder. When a lead asks to see photos or
-the property, the agent automatically sends all available media via WhatsApp.
-
-The `MEDIA_BASE_URL` environment variable must point to the public base URL
-(your ngrok URL in development) so Twilio can fetch the files.
-
-### Listing configuration
-
-Edit `data/<property>/listing.json` with the property details. The agent uses
-this as its **single source of truth** — it will never invent facts not in
-this file.
-
-Key sections: `property`, `pricing`, `availability`, `building_amenities`,
-`location`, `highlights`, `known_issues`, `owner_instructions`.
-
-The `owner_instructions` section controls agent behaviour:
-
-```json
-{
-  "do_not_disclose": ["minimum_acceptable price"],
-  "emphasize": ["forest view", "brand new"],
-  "visit_policy": "coordinate directly with owner",
-  "negotiation_policy": "do not negotiate — redirect to owner"
+  "score": 85,
+  "notified_at": "2026-03-01T10:00:00+00:00",
+  "closed_at": "2026-03-01T10:00:00+00:00"
 }
 ```
 
@@ -391,20 +410,20 @@ The `owner_instructions` section controls agent behaviour:
 For production:
 
 1. Set `server.reload: false` in `config/app.yaml`.
-2. Use a process manager (systemd, Docker, Fly.io, Render).
-3. Replace the file-based store with a database (Postgres, SQLite, etc.) by
-   implementing a new class with the same interface as `ConversationStore`.
-4. Add webhook signature validation using `TWILIO_AUTH_TOKEN`.
-5. Consider running behind a reverse proxy (nginx, Caddy) with HTTPS.
+2. Set `security.validate_twilio_signature: true`.
+3. Use a process manager (systemd, Docker, Fly.io, Render).
+4. Replace the file-based store with a database by implementing a new class with the same `ConversationStore` interface.
+5. Run behind a reverse proxy (nginx, Caddy) with HTTPS.
+6. Set `MEDIA_BASE_URL` to your production domain.
 
 ---
 
 ## Security & Privacy
 
-- **PII**: Phone numbers are stored as folder names (digits only) under
-  each property's storage directory.  In production, consider hashing them.
+- **Signature validation**: Enable `security.validate_twilio_signature` in production to reject forged webhook requests.
+- **Rate limiting**: Prevents message floods and OpenAI cost abuse (configurable per-phone limits).
+- **PII**: Phone numbers are stored as folder names (digits only). In production, consider hashing.
 - **Secrets**: API keys live exclusively in `.env`, never in YAML or code.
-- **Logging**: Hebrew message content appears in logs.  In production,
-  reduce log level or redact PII from log output.
-- **Retention**: Conversation and lead files persist indefinitely.
-  Add a TTL / cleanup job for production.
+- **Logging**: Hebrew message content appears in logs. In production, reduce log level or redact PII.
+- **Retention**: Conversation and lead files persist indefinitely. Add a TTL / cleanup job for production.
+- **End state**: Closed/disqualified leads incur zero OpenAI cost on subsequent messages.

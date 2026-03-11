@@ -21,3 +21,14 @@ paths:
   storage_dir: storage
   data_dir: data
   active_property: property_2
+
+notification:
+  enabled: true
+
+rate_limit:
+  max_messages: 10
+  window_seconds: 300
+  cooldown_message: "אתה שולח הודעות מהר מדי. נסה שוב בעוד מספר דקות."
+
+security:
+  validate_twilio_signature: false

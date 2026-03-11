@@ -1,28 +1,50 @@
-fields:
-  - name: intent
-    description: "buy or rent"
-    required: true
-    priority: 1
+fields_by_type:
+  rent:
+    - name: intent
+      description: "buy or rent"
+      required: true
+      priority: 1
 
-  - name: budget_range
-    description: "budget_min / budget_max in ILS"
-    required: true
-    priority: 2
+    - name: budget_range
+      description: "budget_min / budget_max in ILS"
+      required: true
+      priority: 2
 
-  - name: timeframe
-    description: "urgency / timeframe (immediate, 1-3 months, flexible)"
-    required: true
-    priority: 3
+    - name: timeframe
+      description: "urgency / timeframe (immediate, 1-3 months, flexible)"
+      required: true
+      priority: 3
 
-  - name: wants_visit
-    description: "interest in visiting the property"
-    required: true
-    priority: 4
+    - name: wants_visit
+      description: "interest in visiting the property"
+      required: true
+      priority: 4
 
-  - name: equity_amount
-    description: "cash / equity available"
-    required: true
-    priority: 5
+  buy:
+    - name: intent
+      description: "buy or rent"
+      required: true
+      priority: 1
+
+    - name: budget_range
+      description: "budget_min / budget_max in ILS"
+      required: true
+      priority: 2
+
+    - name: equity_amount
+      description: "cash / equity available"
+      required: true
+      priority: 3
+
+    - name: timeframe
+      description: "urgency / timeframe (immediate, 1-3 months, flexible)"
+      required: true
+      priority: 4
+
+    - name: wants_visit
+      description: "interest in visiting the property"
+      required: true
+      priority: 5
 
 scoring:
   points_per_field: 15
@@ -30,5 +52,7 @@ scoring:
   red_flag_penalty: 15
   max_score: 100
 
-status_transitions:
-  qualified_max_missing: 2
+status_rules:
+  min_turns: 2
+  qualified_max_missing: 1
+  budget_floor_pct: 0.6
